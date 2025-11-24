@@ -8,6 +8,9 @@ typedef struct {
     size_t size; // Size of the block (including the header)
                  // Final digit indicates status. 0 means free, 1 means taken.
 } Header;
+typedef struct {
+    size_t size; 
+} Footer;
 
 // Initialize the allocator over a provided memory block. Returns 0 on success, non-zero on failure.
 int mm_init(uint8_t *heap, size_t heap_size){
@@ -38,26 +41,27 @@ void *mm_malloc(size_t size){
                 // |= is bitwise OR, first 7 bits will remain as they are, last will be switched to a 1
                 currentHeader->size |= 1;
 
-                // Calculate next payload location (not necessary just yet but might be useful later)
-                // Takes current header pointer, adds the size of the header and payload, takes 39 so we round up
-                // Removes any bits used to represent 1-39, leaving a multiple of 40
-                uint8_t *payload = (uint8_t *)(((uintptr_t)currentHeader + sizeof(Header) + size + 39) & ~39);
-
+                // Create footer with same contents as the header. Later this will include a checksum.
+                Footer *newFooter = (Footer *)((uintptr_t)currentHeader + sizeof(Header) + size);
+                newFooter -> size = currentHeader -> size;
                 // Calculate next header location
-                // Takes current header pointer, adds the size of the header and payload
-                uint8_t *nextHeader = (uint8_t *)((uintptr_t)currentHeader + sizeof(Header) + size )
+                // Takes current header pointer, adds the size of the metadata and payload and 39 so we round up to the next 40-aligned position
+                // Removes any bits used to represent 1-39, leaving a multiple of 40
+                uint8_t *nextHeader = (uint8_t *)(((uintptr_t)currentHeader + sizeof(Header) + sizeof(Footer) + size + 39) & ~39);              
                 Header *newHeader = (Header *)nextHeader;
-                // Size of new header is size of the current header - size of the payload and header
-                newHeader->size = ((currentHeader->size & ~1) - (size + sizeof(Header))) & ~1;
-                break;
+
+                // Size of new header is size of the current header - size of the payload and metadata
+                newHeader -> size = ((currentHeader->size & ~1) - (size + sizeof(Header) + sizeof(Footer))) & ~1;
+                
+                return (void *)currentHeader;
             }
 
             else{
-                // current header pointer = current header pointer + currentheader.size
+                // Next header
+                currentHeader = (Header *)((uint8_t *)currentHeader + (((currentHeader->size & ~1) + 39) & ~39));            
             }
      }
-
-
+    return NULL;
 }
 
 // Safely read data from an allocated block at offset bytes into buf.

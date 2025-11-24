@@ -1,0 +1,82 @@
+MARS NOTEPAD
+
+
+
+
+
+
+
+
+Runme:
+We are only graded on the .so library file, the runme is a separate program that we create that #includes the library, which is used purely for our testing and debugging purposes, 
+and will not have anything to do with our final grade (Stuart said we could have it be blank if we were confident enough that the code will run without issue on the autograder - please don't do this).
+
+Byte alignment:
+Byte alignment should be relative to the start of the heap, e.g. blocks of memory could be bytes 0-39, 40-399 etc of the heap. The memory addresses themselves do not have to be multiples of 40.
+(i.e if the heap pointer itself points to memory address 67, then the pointer for each memory block should point to 67+40n, where n is an integer >= 0. The payload for the block can begin at a different address 
+(e.g. if theres metadata) as long as the program handles it correctly). 
+
+5-byte pattern thingy:
+The autograder will automatically set all bytes in the heap to a random 5-byte pattern before running mm_init. Mm_init should then detect this pattern and store it for future use.
+When bytes become used, this should be overwritten (Stuart was very vague about whether this should be done at the malloc stage or the write stage, but either should work).
+When freeing a block of memory, the 5-byte “unused” pattern should be restored - apparently this pattern will be used to gauge memory efficiency of the program.
+When testing using runme, we need to define our own 5-byte pattern to use and set all the bytes allocated to the heap to use this pattern before calling mm_init.
+
+Mm_malloc:
+The size passed into mm_malloc must match the payload size of the returned block of memory, any additional metadata or information contained in the block should not count towards the size. 
+The pointer returned by mm_malloc must follow the byte alignment.
+
+Mm_read:
+Mm_read should read the contents stored in the payload of the block of memory referenced by ptr, starting at offset bytes and reading until the end of the payload. \
+this contents should be read into buf, which is a pointer to some external memory location that the main program (the autograder itself) can then access.
+(e.g. if offset was 2, it would read from the third byte to the end of the payload)
+
+Mm_write:
+Mm_write should write the contents of the memory addressed by src into the payload of the block of memory referenced by ptr, beginning write at offset bytes into the payload.
+Stuart did not mention what len is for, but I'm assuming length of expected input?
+
+Problem Definition
+You are to design and implement a robust, fault-tolerant malloc/free system operating
+entirely within a single contiguous block of memory supplied by the rover’s OS. This
+block is the only dynamic storage available for mission software, and all allocator metadata
+must live inside it.
+
+The allocator must:
+    1. Allocate and free memory efficiently during normal operation.
+    2. Detect signs of corruption caused by bit-flips in both metadata and payload.
+    3. Fail safely when corruption is detected: no undefined behaviour, no unsafe pointer
+    dereferences, and no corrupted block reuse.
+    4. Recover where possible by isolating or quarantining damaged memory regions.
+    5. Operate without using malloc, free, or any other standard C library allocation
+    functions as this goes outside of the allocated memory.
+
+Operational Scenarios
+The autograder will simulate conditions the Mars rover allocator will face, however, some
+minimal tests will be provided during development:
+    • Normal Operations (Clear Skies)
+    Sequential and mixed allocation/free requests with no corruption events. Tests base
+    functionality, alignment, and fragmentation management.
+    • Radiation Storms
+    Random bit-flips occur in heap memory, targeting both block metadata and payload.
+    Elevated error rates test the allocator’s ability to detect and contain corruption.
+    • Brownout Events
+    Simulated power dips interrupt metadata writes mid-operation, leaving some data
+    partially updated. Allocator/access functions must detect these inconsistencies.
+
+Mission Constraints
+    • Heap Size: Provided by the OS; large enough to allow flexibility in design and error-
+    checking strategies.
+    • Alignment: All returned pointers must meet the specified byte-alignment
+    requirement.
+    • Metadata Design: You may choose your own data structure within the block of
+    memory, integrity checks, and allocation policy.
+    • Isolation: Damaged blocks must not re-enter the allocation pool until explicitly
+    repaired or quarantined.
+    • No Host Heap: You may not use dynamic allocation from the C standard library for
+    additional; stack variables should not be used to store data.
+    • Unused bytes should be clearly identified: This should use the recurring 5-byte
+    pattern provided, your allocator should detect this on initialization (mm_init), then
+    when deallocated, reset it to make clear use of memory.
+
+
+
