@@ -1,6 +1,32 @@
 MARS NOTEPAD
 
+BASIC FUNCTIONALITY COMPLETE
 
+Next Steps:
+  -Implement and test robustness for radiation storms and brownout events.
+  -Add the heap full test to runme.c.
+  -Add debugging functionality to print the heap state.
+  -Expand runme.c to include edge case tests.
+  -Verify and optimize the allocator’s performance.
+
+mmwrite:
+    -go to mmalloc pointer
+    -check header
+        if block full, or not enough space for len + source, return -1
+        else:
+    -copy len number of bytes starting from source (memcpy(des,src,len))
+    -move forward size(header) + offset
+    -"paste" data
+    -return number of bytes written
+    done
+
+mmfree:
+  -go to pointer
+  -check it isnt free (is it fivebitepattern?)
+  -mark as free
+  -replace all bytes within header -> size + sizeof(footer) with fivebytepattern
+  -do i need to mess with header in any other way? what if the next header is free, probably not a good idea to a header that says that the next x bytes is free, when in reality more
+  is free
 
 
 
@@ -78,5 +104,17 @@ Mission Constraints
     pattern provided, your allocator should detect this on initialization (mm_init), then
     when deallocated, reset it to make clear use of memory.
 
-
+Requirements for runme:
+    • Must be compiled by your Makefile (target name: runme).
+    • May take command-line arguments to control tests (for example arguments: --seed,
+      --storm 1, ---size 8192).
+    • Should perform a single call to malloc (or calloc) to allocate the simulated heap block
+      passed to mm_init.
+    • No further dynamic memory allocation is permitted inside your allocator.
+    • Must link against your library (allocator.c / allocator.h) and demonstrate calls to
+      mm_init, mm_malloc, mm_free, and (if implemented) any additional functions.
+    • You may design your own test scenarios; examples include allocating and freeing
+      blocks, simulating corruption, or printing heap state.
+    • Output should be readable and concise, e.g. printing allocation success/failure,
+      corruption detection, or heap summary
 
