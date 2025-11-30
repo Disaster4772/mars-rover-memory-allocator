@@ -67,17 +67,17 @@ void *mm_malloc(size_t size){
                 uint8_t *nextHeader = (uint8_t *)((uintptr_t)heapStart + offset);             
                 Header *newHeader = (Header *)nextHeader;
 
-                // Size of new header is size of the current header - size of the payload and metadata
-                newHeader -> size = ((currentHeader->size & ~1) - (size + sizeof(Header) + sizeof(Footer))) & ~1;
+                // Size of new header is the original size - space used up to the next aligned boundary
+                size_t distanceToNextHeader = offset - ((uintptr_t)currentHeader - (uintptr_t)heapStart);
+                newHeader -> size = ((currentHeader->size & ~1) - distanceToNextHeader) & ~1;
                 
                 return (void *)currentHeader;
             }
 
             else{
                 // If the current block is taken, move to the next header
-                uintptr_t offset = (uintptr_t)currentHeader + (currentHeader->size & ~1) - (uintptr_t)heapStart;
-                offset = ((offset + 39) / 40) * 40;
-                currentHeader = (Header *)((uintptr_t)heapStart + offset);            
+                // Blocks are already 40-byte aligned, so just add the block size directly
+                currentHeader = (Header *)((uintptr_t)currentHeader + (currentHeader->size & ~1));            
             }
      }
     return NULL;
