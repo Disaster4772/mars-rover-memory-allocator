@@ -20,4 +20,5 @@ zip:
 clean:
 	rm -f runme
 	rm -f allocator.zip
+	rm -f liballocator.so
 	

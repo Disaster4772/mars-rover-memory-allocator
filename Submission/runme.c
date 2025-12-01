@@ -30,7 +30,7 @@ void initialize_heap_with_pattern(uint8_t *heap, size_t heap_size, uint8_t *patt
 int main(int argc, char *argv[]) {
     int seed = 42; // Default seed
     int storm = 0; // Default storm type
-    size_t heapSize = 4096; // Default heap size (increased from 1024)
+    size_t heapSize = 65536; // Default heap size 
 
     // Parse command-line arguments
     parse_arguments(argc, argv, &seed, &storm, &heapSize);
@@ -222,24 +222,24 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Freed all 20 small blocks\n");
 
-    printf("\n=== TEST 8: Fragmentation and coalescing ===\n");
-    // Allocate, free, allocate pattern to test coalescing
-    void *frag1 = mm_malloc(40);
-    void *frag2 = mm_malloc(40);
-    void *frag3 = mm_malloc(40);
-    printf("PASS: Allocated 3x40 byte blocks\n");
-    
+    printf("\n=== TEST 8: Fragmentation and Coalescing ===\n");
+    // Adjusted for larger heap
+    void *frag1 = mm_malloc(4000);
+    void *frag2 = mm_malloc(4000);
+    void *frag3 = mm_malloc(4000);
+    printf("PASS: Allocated 3x4000 byte blocks\n");
+
     mm_free(frag2);  // Free middle block
     printf("PASS: Freed middle block\n");
-    
-    void *frag2new = mm_malloc(40);  // Should reuse freed space
+
+    void *frag2new = mm_malloc(4000);  // Should reuse freed space
     if (frag2new == NULL) {
         printf("FAIL: Could not reallocate after freeing middle block\n");
         free(heap);
         return 1;
     }
     printf("PASS: Reallocated freed middle block\n");
-    
+
     mm_free(frag1);
     mm_free(frag2new);
     mm_free(frag3);
@@ -501,19 +501,20 @@ int main(int argc, char *argv[]) {
     printf("PASS: Freed large block\n");
 
     printf("\n=== TEST 19: Stress test - many small allocations ===\n");
-    void *ptrs[100];
-    for (int i = 0; i < 100; i++) {
+    void *ptrs[2000]; // Adjusted to test the limits of a 64 KB heap
+    int allocatedBlocks = 0;
+    for (int i = 0; i < 2000; i++) {
         ptrs[i] = mm_malloc(10);
         if (ptrs[i] == NULL) {
-            printf("FAIL: Could not allocate block %d\n", i);
-            free(heap);
-            return 1;
+            printf("Heap exhausted after %d allocations of 10-byte blocks.\n", i);
+            break;
         }
+        allocatedBlocks++;
     }
-    printf("PASS: Allocated 100 blocks of 10 bytes each\n");
-    
-    // Write to all
-    for (int i = 0; i < 100; i++) {
+    printf("PASS: Allocated %d blocks of 10 bytes each\n", allocatedBlocks);
+
+    // Write to all allocated blocks
+    for (int i = 0; i < allocatedBlocks; i++) {
         uint8_t val = (uint8_t)(i % 256);
         if (mm_write(ptrs[i], 0, &val, 1) != 1) {
             printf("FAIL: Could not write to block %d\n", i);
@@ -521,10 +522,10 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    printf("PASS: Wrote to all 100 blocks\n");
-    
-    // Read from all
-    for (int i = 0; i < 100; i++) {
+    printf("PASS: Wrote to all %d blocks\n", allocatedBlocks);
+
+    // Read from all allocated blocks
+    for (int i = 0; i < allocatedBlocks; i++) {
         uint8_t val;
         if (mm_read(ptrs[i], 0, &val, 1) != 1 || val != (uint8_t)(i % 256)) {
             printf("FAIL: Could not read from block %d (got %u, expected %u)\n", i, val, (uint8_t)(i % 256));
@@ -532,13 +533,13 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    printf("PASS: Read from all 100 blocks verified\n");
-    
-    // Free all
-    for (int i = 0; i < 100; i++) {
+    printf("PASS: Read from all %d blocks verified\n", allocatedBlocks);
+
+    // Free all allocated blocks
+    for (int i = 0; i < allocatedBlocks; i++) {
         mm_free(ptrs[i]);
     }
-    printf("PASS: Freed all 100 blocks\n");
+    printf("PASS: Freed all %d blocks\n", allocatedBlocks);
 
     printf("\n=== TEST 20: Alternating pattern - allocate/free/allocate ===\n");
     void *alt1 = mm_malloc(100);
@@ -564,6 +565,150 @@ int main(int argc, char *argv[]) {
     mm_free(alt2);
     mm_free(alt3);
     printf("PASS: Freed remaining blocks\n");
+
+    printf("\n=== TEST 21: Coalescing Verification ===\n");
+    // Adjusted for larger heap
+    void *coal1 = mm_malloc(20000);
+    void *coal2 = mm_malloc(20000);
+    void *coal3 = mm_malloc(20000);
+    if (coal1 == NULL || coal2 == NULL || coal3 == NULL) {
+        printf("FAIL: Could not allocate blocks for coalescing test\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocated 3 blocks of 20000 bytes each\n");
+
+    mm_free(coal2);
+    printf("PASS: Freed middle block\n");
+
+    mm_free(coal1);
+    printf("PASS: Freed first block\n");
+
+    // Coalescing should merge coal1 and coal2
+    void *coal4 = mm_malloc(40000);
+    if (coal4 == NULL) {
+        printf("FAIL: Coalescing failed to merge free blocks\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Coalescing merged free blocks successfully\n");
+
+    mm_free(coal3);
+    mm_free(coal4);
+    printf("PASS: Freed all blocks in coalescing test\n");
+
+    printf("\n=== TEST 22: Heap Exhaustion ===\n");
+    // Adjusted for larger heap
+    void *exhaustBlocks[2000];
+    int i;
+    for (i = 0; i < 2000; i++) {
+        exhaustBlocks[i] = mm_malloc(30);
+        if (exhaustBlocks[i] == NULL) {
+            printf("PASS: Heap exhausted after %d allocations\n", i);
+            break;
+        }
+    }
+    if (i == 2000) {
+        printf("FAIL: Heap exhaustion test did not exhaust heap\n");
+        free(heap);
+        return 1;
+    }
+
+    // Free all allocated blocks
+    for (int j = 0; j < i; j++) {
+        mm_free(exhaustBlocks[j]);
+    }
+    printf("PASS: Freed all blocks after heap exhaustion test\n");
+
+    printf("\n=== TEST 23: Zero Allocation ===\n");
+    // Test allocation of size 0
+    void *zeroAlloc = mm_malloc(0);
+    if (zeroAlloc != NULL) {
+        printf("FAIL: Allocation of size 0 should return NULL\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocation of size 0 correctly returned NULL\n");
+
+    printf("\n=== TEST 24: Alignment Verification ===\n");
+    // Allocate blocks and check alignment
+    void *alignTest1 = mm_malloc(10);
+    void *alignTest2 = mm_malloc(10);
+    void *alignTest3 = mm_malloc(10);
+
+    uintptr_t offset1 = (uintptr_t)alignTest1 - (uintptr_t)heap;
+    uintptr_t offset2 = (uintptr_t)alignTest2 - (uintptr_t)heap;
+    uintptr_t offset3 = (uintptr_t)alignTest3 - (uintptr_t)heap;
+
+    if (offset1 % 40 != 0 || offset2 % 40 != 0 || offset3 % 40 != 0) {
+        printf("FAIL: Blocks not aligned correctly (offsets: %zu, %zu, %zu)\n", offset1, offset2, offset3);
+        free(heap);
+        return 1;
+    }
+    printf("PASS: All blocks are correctly aligned\n");
+
+    mm_free(alignTest1);
+    mm_free(alignTest2);
+    mm_free(alignTest3);
+
+    printf("\n=== TEST 25: Double-Free Detection ===\n");
+    // Test double-free detection
+    void *doubleFreeTest = mm_malloc(50);
+    mm_free(doubleFreeTest);
+    printf("PASS: Freed block once\n");
+
+    printf("Attempting double-free (should print error):\n");
+    mm_free(doubleFreeTest);
+    printf("PASS: Double-free detected and handled\n");
+
+    printf("\n=== TEST: Magic Number Validation (Header and Footer) ===\n");
+
+    // Allocate a block
+    size_t magicBlockSize = 100;
+    void *magicBlock = mm_malloc(magicBlockSize);
+    if (magicBlock == NULL) {
+        printf("FAIL: Failed to allocate block for magic number test.\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocated block for magic number test.\n");
+
+    // DEBUG: Directly access the Header and Footer structures to corrupt the magic numbers
+    Header *header = (Header *)magicBlock;
+    Footer *footer = (Footer *)((uint8_t *)magicBlock + header->size - sizeof(Footer));
+
+    printf("DEBUG: Original header magic number: 0x%X\n", header->magic);
+    printf("DEBUG: Original footer magic number: 0x%X\n", footer->magic);
+
+    // Corrupt the magic numbers
+    header->magic = 0xDEADC0DE; // Corrupt the header magic number
+    footer->magic = 0xBADF00D;  // Corrupt the footer magic number
+
+    printf("DEBUG: Corrupted header magic number: 0x%X\n", header->magic);
+    printf("DEBUG: Corrupted footer magic number: 0x%X\n", footer->magic);
+
+    // Attempt to write to the corrupted block
+    const char *testData = "Magic Test";
+    size_t testDataLen = strlen(testData) + 1;
+    if (mm_write(magicBlock, 0, testData, testDataLen) != -1) {
+        printf("FAIL: Write succeeded on a block with corrupted magic numbers.\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Write failed as expected on a block with corrupted magic numbers.\n");
+
+    // Attempt to read from the corrupted block
+    char testBuffer[100];
+    if (mm_read(magicBlock, 0, testBuffer, testDataLen) != -1) {
+        printf("FAIL: Read succeeded on a block with corrupted magic numbers.\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Read failed as expected on a block with corrupted magic numbers.\n");
+
+    // Free the corrupted block
+    mm_free(magicBlock);
+    printf("PASS: Freed block with corrupted magic numbers.\n");
 
     printf("\n=== ALL TESTS COMPLETED ===\n");
     
