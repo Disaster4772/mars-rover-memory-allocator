@@ -2,6 +2,8 @@ MARS NOTEPAD
 
 BASIC FUNCTIONALITY COMPLETE
 
+
+
 Next Steps:
   -Implement and test robustness for radiation storms and brownout events.
   -Add the heap full test to runme.c.
@@ -117,69 +119,47 @@ Requirements for runme:
       blocks, simulating corruption, or printing heap state.
     • Output should be readable and concise, e.g. printing allocation success/failure,
       corruption detection, or heap summary
+      
+----- TODO / ACTION ITEMS (PRIORITIZED) -----
 
+1) Immediate Safety Fixes (do these first)
+ - Fix orphaned footers in `Submission/allocator.c` `mm_malloc`:
+   * If `remainingSize < sizeof(Header)+sizeof(Footer)`, absorb the remainder into the allocated block
+     (set the allocated block's size back to `originalBlockSize`) so no orphan footer remains.
+ - Never write to memory when footer magic mismatches. If `currentFooter->magic != 0xDEADBEEF`:
+   * Do not assign `currentFooter->status = 2` (this may overwrite payload). Instead quarantine the header only
+     (header->status = 2), or perform a safe aligned lookahead and accept only validated header+footer pairs.
+ - Decide and standardize return semantics: make `mm_malloc` return a payload pointer (recommended),
+   and update `Submission/runme.c` call sites to use the payload pointer.
 
-=== RADIATION HARDENING PLAN ===
+2) Integrity & Detection (high value)
+ - Add a checksum field to `Header` and `Footer` (start with XOR or CRC8). Recalculate and store when creating/altering blocks.
+ - Verify checksums in `mm_read`, `mm_write`, `mm_free`, and during `mm_malloc` scanning. Quarantine blocks on mismatch.
+ - Implement `mm_verify_heap()` to traverse heap and report corrupted/quarantined regions.
 
-Phase 1: Corruption Detection (Medium Priority)
-  1. Add checksum to Header/Footer metadata
-     - Store CRC or simple XOR checksum of size field
-     - Verify on every mm_malloc/mm_free access
-     - If corrupted, mark block as quarantined
-  
-  2. Implement mm_verify_heap() function
-     - Scan all blocks from heap start
-     - Check that block chains are valid (each next pointer lands on valid Header)
-     - Verify checksums on all metadata
-     - Track corrupted regions
-     - Return list of damaged blocks
-  
-  3. Add corruption detection to mm_read/mm_write
-     - Verify header before reading/writing
-     - Return error if metadata is corrupted
-     - Log which block was damaged
+3) Robust Scanning / Allocation
+ - Harden `mm_malloc` scanning with a bounded aligned lookahead: when header magic mismatches, scan up to N subsequent
+   aligned offsets (e.g., N=16 or N covering ~1KB) and accept a candidate only if header+footer magic/checksum validate.
+ - When splitting a free block, only create a new free header/footer if `remainingSize >= sizeof(Header)+sizeof(Footer)`.
+ - If absorbing tiny remainder, be explicit in comments and tests so future changes don't reintroduce orphan footers.
 
-Phase 2: Recovery & Quarantine (Higher Priority)
-  1. Quarantine system for damaged blocks
-     - Mark corrupted blocks as "quarantined" (separate flag or special size value)
-     - Never reallocate quarantined blocks
-     - Track quarantined regions for reporting
-  
-  2. Graceful degradation
-     - When a block is corrupted, isolate it
-     - Continue operation with remaining good blocks
-     - Prevent cascade corruption from damaged metadata
+4) Free/coalescing behaviour
+ - Do not coalesce with quarantined neighbours (status==2).
+ - Ensure `mm_free` wipes only payload bytes (not header/footer) and preserves five-byte pattern phase (current `clearSpace` already uses heap offset).
+ - Add tests for double-free detection and ensure it returns/prints a clear debug message.
 
-  3. Optional: Redundancy
-     - Store duplicate Header/Footer at end of block
-     - Use majority voting if both differ
-     - Requires extra space but improves recovery chances
+5) Testing & Runme
+ - Add a `heap-full` test in `Submission/runme.c` and a Makefile `runme` target.
+ - Add tests: double-free, brownout (partial write), radiation (random bit-flips), and pattern-preservation checks.
+ - Add a debug command-line flag for `runme` to run `mm_verify_heap()` at start/end.
 
-Phase 3: Brownout Protection (Lower Priority)
-  1. Atomic metadata updates
-     - Write metadata in specific order to allow recovery
-     - Example: write new Header at destination, mark old as free, then delete old
-     - If power fails mid-operation, heap should still be valid
-  
-  2. Detect partial writes
-     - Check for "impossible" states (e.g., size field is 0 but block should exist)
-     - Use checksums to detect incomplete writes
-     - Quarantine suspicious blocks
+6) Tooling & Workflow
+ - Add `mm_heap_stats()` (human-readable dump of block offsets, sizes, status, checksum) to help debug.
+ - Use `gcc -Wall -Wextra` during development and add a short CI/local checklist in the README.
+ - Commit small focused patches (e.g., "mm_malloc: absorb tiny remainder; avoid writing mismatched footers").
 
-Implementation Order (if doing this later):
-  FIRST:  Add checksums to Header/Footer + mm_verify_heap() [easy, high value]
-  SECOND: Quarantine system + corruption detection in mm_read/mm_write [medium effort, good protection]
-  THIRD:  Brownout protection + redundancy [complex, lower priority]
+7) Future Hardening (optional)
+ - Consider duplicate/backup header-footer or voting scheme for higher reliability.
+ - Implement atomic update ordering to tolerate partial writes from brownouts.
 
-Checksum Strategy:
-  - Simple XOR of all bytes: quick, catches many bit flips
-  - CRC-8: better error detection, still fast
-  - Store in Footer field, recalculate on every access
-  - Example: header->checksum = header->size ^ 0x55AA; verify: if (header->size ^ 0x55AA != header->checksum) ERROR
-
-Quarantine Flag Strategy:
-  - Use high bit of size field: if (size & 0x8000...) = quarantined
-  - Or add separate "status" field in Header
-  - Once marked, never allocate from that block again
-  - Track count of quarantined blocks for diagnostics
 

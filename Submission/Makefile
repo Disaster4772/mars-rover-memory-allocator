@@ -2,8 +2,11 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g
 
+# Default target
+make: all zip
+
 # Targets
-all: runme liballocator.so zip
+all: runme liballocator.so
 
 runme: runme.c allocator.c
 	$(CC) $(CFLAGS) -o runme runme.c allocator.c
@@ -19,6 +22,5 @@ zip:
 
 clean:
 	rm -f runme
-	rm -f allocator.zip
 	rm -f liballocator.so
-	
+	rm -f allocator.zip
