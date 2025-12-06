@@ -9,12 +9,14 @@ typedef struct {
     uint32_t magic; // Magic number for validation (0xCAFEBEEF)
     size_t size; // Size of the block (including the metadata)
     uint8_t status; // Status of the block (0 = free, 1 = allocated, 2 = quarantined...)
+    uint32_t hChecksum; // Header checksum of all above metadata
 } Header;
 
 typedef struct {
     size_t size; 
     uint8_t status;
     uint32_t magic; // 0xDEADBEEF
+    uint32_t fChecksum;
 } Footer;
 
 // Function prototypes

@@ -119,7 +119,7 @@ Requirements for runme:
       blocks, simulating corruption, or printing heap state.
     • Output should be readable and concise, e.g. printing allocation success/failure,
       corruption detection, or heap summary
-      
+  
 ----- TODO / ACTION ITEMS (PRIORITIZED) -----
 
 1) Immediate Safety Fixes (do these first)
