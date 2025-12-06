@@ -4,6 +4,9 @@
 #include <time.h> // For seeding random number generator
 #include "allocator.h"  // Include your allocator header file
 
+// Forward declaration
+uint32_t calcHeaderChecksum(const Header *h);
+
 // Function to parse command-line arguments
 void parse_arguments(int argc, char *argv[], int *seed, int *storm, size_t *heap_size) {
     for (int i = 1; i < argc; i++) {
@@ -415,6 +418,131 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Correctly rejected allocation of size 0\n");
 
+    printf("\n=== TEST 17: Corruption Tests (Before Stress Tests) ===\n");
+    printf("\n--- TEST 17a: Corrupted Header Detection ---\n");
+    // Test that malloc detects corrupted headers and doesn't use them
+    void *scan0 = mm_malloc(50);  // Allocate before the test block
+    void *scan1 = mm_malloc(50);
+    void *scan1_after = mm_malloc(50);  // Allocate after to ensure space exists
+    if (scan0 == NULL || scan1 == NULL || scan1_after == NULL) {
+        printf("FAIL: Could not allocate blocks for header corruption test\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocated blocks for header corruption test\n");
+
+    // Corrupt the header of scan1
+    Header *corruptHeader = (Header *)scan1;
+    corruptHeader->magic = 0xBADFBEEF;  // Corrupt the magic number
+    printf("PASS: Corrupted header of scan1\n");
+
+    // Try to write to the corrupted block - should fail
+    if (mm_write(scan1, 0, "test", 4) != -1) {
+        printf("FAIL: Write should have failed on corrupted header\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Write correctly rejected corrupted header\n");
+
+    // Try to read from the corrupted block - should fail
+    char scanBuf[100];
+    if (mm_read(scan1, 0, scanBuf, 4) != -1) {
+        printf("FAIL: Read should have failed on corrupted header\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Read correctly rejected corrupted header\n");
+
+    // Verify we can still use scan1_after (allocated after the corrupted block)
+    if (mm_write(scan1_after, 0, "test", 4) != 4) {
+        printf("FAIL: Could not write to block allocated after corrupted block\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Block after corrupted block still usable\n");
+
+    mm_free(scan0);
+    mm_free(scan1_after);
+    // Note: scan1 is corrupted, so we skip freeing it
+
+    printf("\n--- TEST 17b: Corrupted Footer Quarantine ---\n");
+    // Test that malloc quarantines blocks with corrupted footers
+    void *foot1 = mm_malloc(40);
+    void *foot2 = mm_malloc(40);
+    if (foot1 == NULL || foot2 == NULL) {
+        printf("FAIL: Could not allocate blocks for footer corruption test\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocated 2 blocks for footer corruption test\n");
+
+    // Corrupt the footer of foot1
+    Header *footHeader = (Header *)foot1;
+    Footer *corruptFooter = (Footer *)((uint8_t *)foot1 + footHeader->size - sizeof(Footer));
+    corruptFooter->magic = 0xDEADDEAD;  // Corrupt footer magic
+    printf("PASS: Corrupted footer of foot1\n");
+
+    // Try to allocate - should skip the corrupted block and still be able to allocate
+    void *foot3 = mm_malloc(40);
+    if (foot3 == NULL) {
+        printf("FAIL: Could not allocate despite corrupted footer in previous block\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Allocator handled corrupted footer and allocated new block\n");
+
+    // Verify foot1 was quarantined by trying to write to it
+    if (mm_write(foot1, 0, "test", 4) != -1) {
+        printf("FAIL: Should not be able to write to quarantined block\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Quarantined block correctly rejected write operation\n");
+
+    mm_free(foot2);
+    mm_free(foot3);
+
+    printf("\n--- TEST 17c: Checksum Robustness ---\n");
+    // Verify that single-bit corruption is detected
+    void *check1 = mm_malloc(50);
+    if (check1 == NULL) {
+        printf("FAIL: Could not allocate for checksum test\n");
+        free(heap);
+        return 1;
+    }
+
+    // Write initial data
+    mm_write(check1, 0, "Checksum", 8);
+
+    // Flip a single bit in the header (not the checksum field itself)
+    Header *checkHeader = (Header *)check1;
+    uint8_t *headerBytes = (uint8_t *)checkHeader;
+    headerBytes[0] ^= 0x01;  // Flip one bit in magic
+    printf("PASS: Flipped single bit in header\n");
+
+    // Try to read - checksum should detect this
+    char checkBuf[50];
+    if (mm_read(check1, 0, checkBuf, 8) != -1) {
+        printf("FAIL: Checksum failed to detect single-bit corruption\n");
+        free(heap);
+        return 1;
+    }
+    printf("PASS: Checksum correctly detected single-bit corruption\n");
+
+    printf("\n=== END Corruption Tests ===\n");
+
+    printf("\n=== Reinitializing heap for stress tests ===\n");
+    // Reinitialize the heap to clear corrupted/quarantined blocks
+    free(heap);
+    heap = malloc(heapSize);
+    if (heap == NULL) {
+        printf("Failed to reallocate heap memory.\n");
+        return 1;
+    }
+    initialize_heap_with_pattern(heap, heapSize, pattern);
+    mm_init(heap, heapSize);
+    printf("PASS: Heap reinitialized\n");
+
     printf("\n=== TEST 17: Autograder-style allocation/deallocation ===\n");
     // This mimics what an autograder might do: basic alloc/dealloc cycle
     void *a1 = mm_malloc(50);
@@ -490,9 +618,18 @@ int main(int argc, char *argv[]) {
         free(heap);
         return 1;
     }
+    printf("PASS: Wrote 21 bytes to large block\n");
+    
     char large_buf[100];
-    if (mm_read(large, 0, large_buf, 21) != 21 || strcmp(large_buf, "Large block test data") != 0) {
-        printf("FAIL: Could not read from large block\n");
+    memset(large_buf, 0, sizeof(large_buf));
+    int readResult = mm_read(large, 0, large_buf, 21);
+    if (readResult != 21) {
+        printf("FAIL: Could not read from large block (got %d bytes, expected 21)\n", readResult);
+        free(heap);
+        return 1;
+    }
+    if (strcmp(large_buf, "Large block test data") != 0) {
+        printf("FAIL: Read data doesn't match (got: '%s')\n", large_buf);
         free(heap);
         return 1;
     }
