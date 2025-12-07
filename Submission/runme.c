@@ -64,7 +64,7 @@ int main(int argc, char *argv[]) {
     if (storm == 1) {
         printf("Simulating radiation storm...\n");
         // Example: Randomly flip bits in the heap
-        for (size_t i = 0; i < heapSize / 10; i++) {
+        for (size_t i = 0; i < heapSize / 100; i++) {
             size_t index = rand() % heapSize;
             heap[index] ^= (1 << (rand() % 8));
         }
