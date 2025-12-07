@@ -55,36 +55,57 @@ uint32_t calcFooterChecksum(const Footer *f) {
     return (b << 16) | a;
 }
 
-// Helper: Find the previous block header by scanning from heap start
-// Returns NULL if this is the first block or on error
+// Helper: Find the previous block header
+// Attempts to use the footer directly before currentHeader for a O(1) solution, if this fails then forward scan with validation (safer if corruption is present)
 Header *findPreviousHeader(Header *currentHeader) {
-    if ((uintptr_t)currentHeader == (uintptr_t)heapStart) {
-        return NULL;  // No previous block
+    if (currentHeader == NULL || heapStart == NULL) {
+        return NULL;
     }
-    
-    Header *scan = (Header *)heapStart;
-    Header *prev = NULL;
-    
-    // Scan through blocks until we find the one right before current
-    while (scan < currentHeader) {
+
+    uintptr_t firstHeaderPos = (uintptr_t)heapStart + (40 - sizeof(Header));
+    uintptr_t currentAddr = (uintptr_t)currentHeader;
+    uint8_t *heapEnd = heapStart + heapSize;
+
+    if (currentAddr <= firstHeaderPos) {
+        return NULL; // No previous block exists
+    }
+
+    // O(1) attempt using footer directly before current header
+    Footer *prevFooter = (Footer *)((uint8_t *)currentHeader - sizeof(Footer));
+    if ((uint8_t *)prevFooter >= heapStart) {
+        if (prevFooter->magic == 0xDEADBEEF && prevFooter->fChecksum == calcFooterChecksum(prevFooter)) {
+            size_t prevSize = prevFooter->size;
+            Header *prevHeader = (Header *)((uint8_t *)currentHeader - prevSize);
+            if ((uint8_t *)prevHeader >= heapStart && (uint8_t *)prevHeader + sizeof(Header) <= heapEnd) {
+                if (prevHeader->magic == 0xCAFEBEEF && prevHeader->hChecksum == calcHeaderChecksum(prevHeader) && prevHeader->status != 2) {
+                    if ((uint8_t *)prevHeader + prevHeader->size == (uint8_t *)currentHeader) {
+                        return prevHeader;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: forward scan from first header with validation
+    Header *scan = (Header *)firstHeaderPos;
+    while ((uint8_t *)scan + sizeof(Header) <= heapEnd && scan < currentHeader) {
+        if (scan->magic != 0xCAFEBEEF || scan->hChecksum != calcHeaderChecksum(scan)) {
+            break; // Corrupted header encountered
+        }
         size_t blockSize = scan->size;
         if (blockSize == 0) {
-            break;  // Hit end marker
+            break; // End marker or corrupted size
         }
-        prev = scan;
-        scan = (Header *)((uintptr_t)scan + blockSize);
-        if (scan >= currentHeader) {
-            break;
+        Header *next = (Header *)((uint8_t *)scan + blockSize);
+        if (next == currentHeader) {
+            return scan;
         }
+        if (next <= scan || (uint8_t *)next > heapEnd) {
+            break; // Prevent infinite loop or out-of-heap
+        }
+        scan = next;
     }
-    
-    // Verify we found the right previous block
-    if (prev != NULL) {
-        size_t prevSize = prev->size;
-        if ((Header *)((uintptr_t)prev + prevSize) == currentHeader) {
-            return prev;
-        }
-    }
+
     return NULL;
 }
 
@@ -109,19 +130,20 @@ int mm_init(uint8_t *heap, size_t heap_size){
 
     memcpy(fiveBytePattern, heapStart, 5);
 
-    Header *firstHeader = (Header *)heapStart; // Place the header at the start of the heap
-    firstHeader->size = heapSize;              // Set the size of the block
-    firstHeader->status = 0;                   // Mark as free and uncorrupted 
+    // First payload should be at 40-byte aligned offset (e.g., 40)
+    // So first header should be at 40 - sizeof(Header)
+    Header *firstHeader = (Header *)(heapStart + (40 - sizeof(Header)));
+    firstHeader->size = heapSize - (40 - sizeof(Header));
+    firstHeader->status = 0;
     firstHeader->magic = 0xCAFEBEEF;
     firstHeader->hChecksum = calcHeaderChecksum(firstHeader);
 
     // Place footer at the end of the heap
     Footer *firstFooter = (Footer *)(heapStart + heapSize - sizeof(Footer));
-    firstFooter->size = heapSize;
+    firstFooter->size = heapSize - (40 - sizeof(Header));
     firstFooter->status = 0;
     firstFooter->magic = 0xDEADBEEF;
     firstFooter->fChecksum = calcFooterChecksum(firstFooter);
-    // firstFooter->pChecksum = 0;
 
     return 0;
 }
@@ -134,23 +156,25 @@ void *mm_malloc(size_t size){
         return NULL;
      }
      
-     Header *currentHeader = (Header *)heapStart;
+     // First header is at 40 - sizeof(Header) to align first payload to 40
+     Header *currentHeader = (Header *)(heapStart + (40 - sizeof(Header)));
      uint8_t *heapEnd = heapStart + heapSize;
+     
      // While the current header hasn't reached the end of the heap
-     while ((uint8_t *)currentHeader < heapEnd){
+     while ((uint8_t *)currentHeader + sizeof(Header) <= heapEnd){
 
         // Check for corruption in the header
-        // If the header is corrupted, then skip to the next 40 aligned location. We cannot trust anything in the header so just skip ahead by 40.
+        // If the header is corrupted, skip this block and continue scanning
         if (currentHeader->magic != 0xCAFEBEEF || currentHeader->hChecksum != calcHeaderChecksum(currentHeader)) {
-            size_t skipPos = (uintptr_t)currentHeader + 40;
-            skipPos = (skipPos / 40) * 40;
-            // Check we haven't reached the end of the heap
-            if (skipPos > (uintptr_t)(heapStart + heapSize)) {
-                printf("ERROR: ALLOCATION FAILED. Reached end of heap without finding a valid header.\n");
+            // Try to skip by 40 bytes and continue
+            uintptr_t skipPos = (uintptr_t)currentHeader + 40;
+            currentHeader = (Header *)skipPos;
+            
+            // If we've gone past the heap, we're done
+            if ((uint8_t *)currentHeader >= heapEnd) {
+                printf("ERROR: ALLOCATION FAILED. Exhausted heap while scanning past corruption.\n");
                 return NULL;
             }
-            // Unfortunately, we have no way to verify whether we are on a header or not, so quarantining it could result in corrupted a payload. We just move on.
-            currentHeader = (Header *)skipPos;
             continue;
         }
         // At this point, we can trust the header metadata
@@ -181,92 +205,92 @@ void *mm_malloc(size_t size){
             continue;
         }
 
-            // If the current header indicates the block is free and has enough space
-            // Check if this free block can fit the requested payload size
-            size_t freeBlockSize = currentHeader->size;
-            if (freeBlockSize < sizeof(Header) + sizeof(Footer)) {
-                // Corrupted small block size: quarantine and stop
-                currentHeader->status = 2;
-                return NULL;
+        // If the block is marked as free and has the requested amount of space, then we can allocate this block
+        if (currentHeader->status == 0 && (currentHeader->size - sizeof(Header) - sizeof(Footer)) >= size){
+            // Save original block size before modifying
+            size_t originalBlockSize = currentHeader->size;
+
+            // Calculate difference between header and heapStart locations, add header size and round to nearest 40
+            // This essentially gives us our 40n, of heapStart + 40n
+            uintptr_t currentHeaderOffset = (uintptr_t)currentHeader - (uintptr_t)heapStart;
+            uintptr_t payloadOffset = ((currentHeaderOffset + sizeof(Header) + 39) / 40) * 40;
+            // Subtracting the size of the header tells us how far back before the payload we need to place the header
+            uintptr_t newHeaderOffset = payloadOffset - sizeof(Header);
+            
+            // Find where the block ends
+            // Round up to guarantee that there will be enough space for the next header
+            // If the block takes up 39, then we shouldn't place the next payload at +40, as then there wouldn't be space for the header
+            uintptr_t blockEndOffset = ((payloadOffset + size + sizeof(Footer) + 39) / 40) * 40;
+            // Find out how much space we need for the block total (metadata + payload + padding)
+            size_t blockSize = blockEndOffset - newHeaderOffset;
+            
+            // Check if we have enough space (accounting for gap + allocated block)
+            // The previous check was just a quick check to see if there was enough space for the payload, now we can check if we can fit the metadata and necessary padding
+            size_t spaceNeeded = (newHeaderOffset - currentHeaderOffset) + blockSize;
+            if (spaceNeeded > originalBlockSize) {
+                // Not enough space, try next block
+                currentHeader = (Header *)((uintptr_t)currentHeader + originalBlockSize);
+                if ((uint8_t *)currentHeader >= heapEnd) {
+                    printf("ERROR: ALLOCATION FAILED. Reached end of heap without finding a valid header.\n");
+                    return NULL;
+                }
+                continue;
             }
-            size_t freePayloadSpace = freeBlockSize - sizeof(Header) - sizeof(Footer);
-            int isFree = (currentHeader->status) == 0;
+            
+            // Create header at aligned position
+            Header *alignedHeader = (Header *)(heapStart + newHeaderOffset);
+            alignedHeader->size = blockSize;
+            alignedHeader->status = 1;
+            alignedHeader->magic = 0xCAFEBEEF;
+            alignedHeader->hChecksum = calcHeaderChecksum(alignedHeader);
 
-            if (isFree && freePayloadSpace >= size){
+            // Write allocated footer at end of allocated portion
+            Footer *newFooter = (Footer *)(heapStart + blockEndOffset - sizeof(Footer));
+            newFooter->size = blockSize;
+            newFooter->status = 1;
+            newFooter->magic = 0xDEADBEEF;
+            newFooter->fChecksum = calcFooterChecksum(newFooter);
 
-                // Save original block size before modifying
-                size_t originalBlockSize = freeBlockSize;
-
-                // Calculate the aligned distance to next block first, including 40-byte padding
-                uintptr_t currentOffset = (uintptr_t)currentHeader - (uintptr_t)heapStart;
-                uintptr_t unalignedNextOffset = currentOffset + sizeof(Header) + sizeof(Footer) + size;
-                uintptr_t alignedNextOffset = ((unalignedNextOffset + 39) / 40) * 40;
-                size_t distanceToNextHeader = alignedNextOffset - currentOffset;
-
-                // Size of remaining free block if we split at the aligned offset
-                size_t remainingSize = 0;
-                if (originalBlockSize > distanceToNextHeader) {
-                    remainingSize = originalBlockSize - distanceToNextHeader;
-                } 
-                else {
-                    remainingSize = 0;
-                }
-
-                // Decide whether to split or absorb the tiny remainder.
-                if (remainingSize >= sizeof(Header) + sizeof(Footer)) {
-                    // Split: allocated block consumes distanceToNextHeader
-                    currentHeader->size = distanceToNextHeader;
-                    currentHeader->status = 1;
-                    currentHeader->hChecksum = calcHeaderChecksum(currentHeader);
-
-                    // Write allocated footer at end of allocated portion
-                    Footer *allocFooter = (Footer *)((uint8_t *)currentHeader + currentHeader->size - sizeof(Footer));
-                    allocFooter->size = currentHeader->size;
-                    allocFooter->status = 1;
-                    allocFooter->magic = 0xDEADBEEF;
-                    allocFooter->fChecksum = calcFooterChecksum(allocFooter);
-
-                    // Initialize the new free header/footer for remaining space
-                    uint8_t *nextHeaderPtr = (uint8_t *)((uintptr_t)heapStart + alignedNextOffset);
-                    Header *newHeader = (Header *)nextHeaderPtr;
-                    newHeader->size = remainingSize;
-                    newHeader->status = 0;
-                    newHeader->magic = 0xCAFEBEEF;
-                    newHeader->hChecksum = calcHeaderChecksum(newHeader);
-
-                    Footer *newFreeFooter = (Footer *)((uint8_t *)newHeader + remainingSize - sizeof(Footer));
-                    newFreeFooter->size = remainingSize;
-                    newFreeFooter->status = 0;
-                    newFreeFooter->magic = 0xDEADBEEF;
-                    newFreeFooter->fChecksum = calcFooterChecksum(newFreeFooter);
-                } 
-                else {
-                    // Absorb the tiny remainder: allocated block consumes entire original block
-                    currentHeader->size = originalBlockSize;
-                    currentHeader->status = 1;
-                    currentHeader->hChecksum = calcHeaderChecksum(currentHeader);
-
-                    // Place footer at original block end
-                    Footer *allocFooter = (Footer *)((uint8_t *)currentHeader + originalBlockSize - sizeof(Footer));
-                    allocFooter->size = originalBlockSize;
-                    allocFooter->status = 1;
-                    allocFooter->magic = 0xDEADBEEF;
-                    allocFooter->fChecksum = calcFooterChecksum(allocFooter);
-                }
-                // Wipe area between header and footer 
-                uint8_t *sectionStart =(uint8_t *)currentHeader + sizeof(Header);
-                size_t sectionSize = currentHeader->size - sizeof(Header) - sizeof(Footer);
-                if (sectionSize > 0){
-                    clearSpace(sectionStart, sectionSize);
-                }
-                return (void *)currentHeader;
+            // Wipe the payload area
+            uint8_t *sectionStart = (uint8_t *)alignedHeader + sizeof(Header);
+            size_t sectionSize = blockSize - sizeof(Header) - sizeof(Footer);
+            if (sectionSize > 0){
+                clearSpace(sectionStart, sectionSize);
             }
 
-            else{
-                // If the current block is taken, move to the next header
-                // Blocks are already 40-byte aligned, so just add the block size directly
-                currentHeader = (Header *)((uintptr_t)currentHeader + (currentHeader->size));            
+            // Wipe the gap (orphaned header) if there is one
+            if (newHeaderOffset > currentHeaderOffset) {
+                size_t gapSize = newHeaderOffset - currentHeaderOffset;
+                clearSpace((uint8_t *)currentHeader, gapSize);
             }
+
+            // Check if there's remaining space to create a new free block
+            size_t remainingSpace = originalBlockSize - ((newHeaderOffset - currentHeaderOffset) + blockSize);
+            if (remainingSpace >= sizeof(Header) + sizeof(Footer)) {
+                // Create new free block after the allocated block
+                uintptr_t nextFreeOffset = blockEndOffset;
+                Header *nextHeader = (Header *)(heapStart + nextFreeOffset);
+                nextHeader->size = remainingSpace;
+                nextHeader->status = 0;
+                nextHeader->magic = 0xCAFEBEEF;
+                nextHeader->hChecksum = calcHeaderChecksum(nextHeader);
+
+                // currentFooter was the sibling of currentHeader, but now appears after the newFooter, so just overwrite it and use it for this new block
+                // Overwrite to use it for the new block
+                currentFooter->size = remainingSpace;
+                currentFooter->status = 0;
+                currentFooter->magic = 0xDEADBEEF;
+                currentFooter->fChecksum = calcFooterChecksum(currentFooter);
+            }
+            // Return payload pointer (40-byte aligned)
+            return (void *)(heapStart + payloadOffset);
+        }
+
+        else{
+            // If the current block is taken, move to the next header
+            // Blocks are already 40-byte aligned, so just add the block size directly
+            currentHeader = (Header *)((uintptr_t)currentHeader + (currentHeader->size));
+        }
      }
     return NULL;
 }
@@ -274,7 +298,8 @@ void *mm_malloc(size_t size){
 // Safely read data from an allocated block at offset bytes into buf
 // Returns the number of bytes read, or -1 if corruption or invalid pointer detected
 int mm_read(void *ptr, size_t offset, void *buf, size_t len){
-    Header *header = (Header *)ptr;
+    // Convert payload pointer back to header pointer
+    Header *header = (Header *)((uint8_t *)ptr - sizeof(Header));
     // Check it magic number for corruption, quarantine if there is.
     // Needs to be done first, as everything else relies on the header being correct
 
@@ -317,7 +342,8 @@ int mm_read(void *ptr, size_t offset, void *buf, size_t len){
         return -1;
     }
 
-    uint8_t *readPointer = (uint8_t *)ptr + sizeof(Header) + offset;
+    // Read from payload starting at ptr + offset
+    uint8_t *readPointer = (uint8_t *)ptr + offset;
     memcpy(buf, readPointer, len);
     return len;
 }
@@ -325,8 +351,8 @@ int mm_read(void *ptr, size_t offset, void *buf, size_t len){
 // Safely write data into an allocated block at offset bytes from src
 // Returns the number of bytes written, or -1 if corruption or invalid pointer detected
 int mm_write(void *ptr, size_t offset, const void *src, size_t len){
-    
-    Header *header = (Header *)ptr;
+    // Convert payload pointer back to header pointer
+    Header *header = (Header *)((uint8_t *)ptr - sizeof(Header));
     // Check it magic number for corruption, quarantine if there is
     // Needs to be done first, as everything else relies on the header being correct
 
@@ -369,8 +395,8 @@ int mm_write(void *ptr, size_t offset, const void *src, size_t len){
         return -1;
     }
 
-    // Write to block
-    uint8_t *writePointer = (uint8_t *)ptr + sizeof(Header) + offset;
+    // Write to block payload starting at ptr + offset
+    uint8_t *writePointer = (uint8_t *)ptr + offset;
     memcpy(writePointer, src, len);
     return len;
 }
@@ -389,7 +415,8 @@ void mm_free(void *ptr){
         return;
     }
     
-    Header *currentHeader = (Header *)ptr;
+    // ptr is the payload pointer - convert to header
+    Header *currentHeader = (Header *)((uint8_t *)ptr - sizeof(Header));
 
     // Validate header FIRST (before using header->size)
 
@@ -509,6 +536,27 @@ void mm_free(void *ptr){
                 size_t newSpaceSize = nextHeader->size - sizeof(Header) - sizeof(Footer);
                 if (newSpaceSize > 0) {
                     clearSpace(newSpaceStart, newSpaceSize);
+                }
+            }
+        } else {
+            // No valid header found at expected offset - might be padding
+            // Scan forward in 40-byte increments to find the next block header
+            for (uintptr_t scanAddr = nextHeaderAddr + 40; scanAddr < (uintptr_t)heapStart + heapSize; scanAddr += 40) {
+                Header *scanHeader = (Header *)scanAddr;
+                if (scanHeader->magic == 0xCAFEBEEF && scanHeader->status == 0 &&
+                    scanHeader->hChecksum == calcHeaderChecksum(scanHeader)) {
+                    // Found a valid free block header - include padding and merge
+                    size_t paddingSize = scanAddr - nextHeaderAddr;
+                    currentHeader->size += paddingSize + scanHeader->size;
+                    currentHeader->hChecksum = calcHeaderChecksum(currentHeader);
+
+                    // Recompute footer
+                    Footer *mergedFooter = (Footer *)((uint8_t *)currentHeader + currentHeader->size - sizeof(Footer));
+                    mergedFooter->size = currentHeader->size;
+                    mergedFooter->status = 0;
+                    mergedFooter->magic = 0xDEADBEEF;
+                    mergedFooter->fChecksum = calcFooterChecksum(mergedFooter);
+                    break;
                 }
             }
         }

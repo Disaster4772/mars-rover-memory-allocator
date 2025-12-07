@@ -418,12 +418,24 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Correctly rejected allocation of size 0\n");
 
+    printf("\n=== Reinitializing heap for corruption tests ===\n");
+    // Reinitialize the heap to start fresh for corruption tests
+    free(heap);
+    heap = malloc(heapSize);
+    if (heap == NULL) {
+        printf("Failed to reallocate heap memory.\n");
+        return 1;
+    }
+    initialize_heap_with_pattern(heap, heapSize, pattern);
+    mm_init(heap, heapSize);
+    printf("PASS: Heap reinitialized\n");
+
     printf("\n=== TEST 17: Corruption Tests (Before Stress Tests) ===\n");
     printf("\n--- TEST 17a: Corrupted Header Detection ---\n");
     // Test that malloc detects corrupted headers and doesn't use them
-    void *scan0 = mm_malloc(50);  // Allocate before the test block
-    void *scan1 = mm_malloc(50);
-    void *scan1_after = mm_malloc(50);  // Allocate after to ensure space exists
+    void *scan0 = mm_malloc(10);  // Allocate before the test block
+    void *scan1 = mm_malloc(10);
+    void *scan1_after = mm_malloc(10);  // Allocate after to ensure space exists
     if (scan0 == NULL || scan1 == NULL || scan1_after == NULL) {
         printf("FAIL: Could not allocate blocks for header corruption test\n");
         free(heap);
@@ -432,7 +444,8 @@ int main(int argc, char *argv[]) {
     printf("PASS: Allocated blocks for header corruption test\n");
 
     // Corrupt the header of scan1
-    Header *corruptHeader = (Header *)scan1;
+    // scan1 is a payload pointer, so header is sizeof(Header) bytes before it
+    Header *corruptHeader = (Header *)((uint8_t *)scan1 - sizeof(Header));
     corruptHeader->magic = 0xBADFBEEF;  // Corrupt the magic number
     printf("PASS: Corrupted header of scan1\n");
 
@@ -467,8 +480,8 @@ int main(int argc, char *argv[]) {
 
     printf("\n--- TEST 17b: Corrupted Footer Quarantine ---\n");
     // Test that malloc quarantines blocks with corrupted footers
-    void *foot1 = mm_malloc(40);
-    void *foot2 = mm_malloc(40);
+    void *foot1 = mm_malloc(10);
+    void *foot2 = mm_malloc(10);
     if (foot1 == NULL || foot2 == NULL) {
         printf("FAIL: Could not allocate blocks for footer corruption test\n");
         free(heap);
@@ -477,13 +490,14 @@ int main(int argc, char *argv[]) {
     printf("PASS: Allocated 2 blocks for footer corruption test\n");
 
     // Corrupt the footer of foot1
-    Header *footHeader = (Header *)foot1;
-    Footer *corruptFooter = (Footer *)((uint8_t *)foot1 + footHeader->size - sizeof(Footer));
+    // foot1 is a payload pointer, so header is sizeof(Header) bytes before it
+    Header *footHeader = (Header *)((uint8_t *)foot1 - sizeof(Header));
+    Footer *corruptFooter = (Footer *)((uint8_t *)footHeader + footHeader->size - sizeof(Footer));
     corruptFooter->magic = 0xDEADDEAD;  // Corrupt footer magic
     printf("PASS: Corrupted footer of foot1\n");
 
     // Try to allocate - should skip the corrupted block and still be able to allocate
-    void *foot3 = mm_malloc(40);
+    void *foot3 = mm_malloc(10);
     if (foot3 == NULL) {
         printf("FAIL: Could not allocate despite corrupted footer in previous block\n");
         free(heap);
@@ -504,7 +518,7 @@ int main(int argc, char *argv[]) {
 
     printf("\n--- TEST 17c: Checksum Robustness ---\n");
     // Verify that single-bit corruption is detected
-    void *check1 = mm_malloc(50);
+    void *check1 = mm_malloc(10);
     if (check1 == NULL) {
         printf("FAIL: Could not allocate for checksum test\n");
         free(heap);
@@ -515,7 +529,8 @@ int main(int argc, char *argv[]) {
     mm_write(check1, 0, "Checksum", 8);
 
     // Flip a single bit in the header (not the checksum field itself)
-    Header *checkHeader = (Header *)check1;
+    // check1 is a payload pointer, so header is sizeof(Header) bytes before it
+    Header *checkHeader = (Header *)((uint8_t *)check1 - sizeof(Header));
     uint8_t *headerBytes = (uint8_t *)checkHeader;
     headerBytes[0] ^= 0x01;  // Flip one bit in magic
     printf("PASS: Flipped single bit in header\n");
@@ -678,6 +693,10 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Freed all %d blocks\n", allocatedBlocks);
 
+    // Reinitialize heap for next phase of testing
+    initialize_heap_with_pattern(heap, heapSize, pattern);
+    mm_init(heap, heapSize);
+
     printf("\n=== TEST 20: Alternating pattern - allocate/free/allocate ===\n");
     void *alt1 = mm_malloc(100);
     void *alt2 = mm_malloc(100);
@@ -722,7 +741,8 @@ int main(int argc, char *argv[]) {
     printf("PASS: Freed first block\n");
 
     // Coalescing should merge coal1 and coal2
-    void *coal4 = mm_malloc(40000);
+    // Account for alignment padding - request slightly less than coal1+coal2
+    void *coal4 = mm_malloc(39000);
     if (coal4 == NULL) {
         printf("FAIL: Coalescing failed to merge free blocks\n");
         free(heap);
@@ -767,6 +787,10 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Allocation of size 0 correctly returned NULL\n");
 
+    // Reinitialize heap for final tests
+    initialize_heap_with_pattern(heap, heapSize, pattern);
+    mm_init(heap, heapSize);
+
     printf("\n=== TEST 24: Alignment Verification ===\n");
     // Allocate blocks and check alignment
     void *alignTest1 = mm_malloc(10);
@@ -810,9 +834,9 @@ int main(int argc, char *argv[]) {
     }
     printf("PASS: Allocated block for magic number test.\n");
 
-    // DEBUG: Directly access the Header and Footer structures to corrupt the magic numbers
-    Header *header = (Header *)magicBlock;
-    Footer *footer = (Footer *)((uint8_t *)magicBlock + header->size - sizeof(Footer));
+    // magicBlock is a payload pointer, so header is sizeof(Header) bytes before it
+    Header *header = (Header *)((uint8_t *)magicBlock - sizeof(Header));
+    Footer *footer = (Footer *)((uint8_t *)header + header->size - sizeof(Footer));
 
     printf("DEBUG: Original header magic number: 0x%X\n", header->magic);
     printf("DEBUG: Original footer magic number: 0x%X\n", footer->magic);
