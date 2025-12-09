@@ -120,46 +120,37 @@ Requirements for runme:
     • Output should be readable and concise, e.g. printing allocation success/failure,
       corruption detection, or heap summary
   
------ TODO / ACTION ITEMS (PRIORITIZED) -----
+How It Works (Design)
+    Draw headers/footers with checksums
+    40-byte alignment via header positioning
+    Magic → Adler-32 → quarantine on corruption
+    Reference: Point to mm_malloc alignment lines, mm_read validation
 
-1) Immediate Safety Fixes (do these first)
- - Fix orphaned footers in `Submission/allocator.c` `mm_malloc`:
-   * If `remainingSize < sizeof(Header)+sizeof(Footer)`, absorb the remainder into the allocated block
-     (set the allocated block's size back to `originalBlockSize`) so no orphan footer remains.
- - Never write to memory when footer magic mismatches. If `currentFooter->magic != 0xDEADBEEF`:
-   * Do not assign `currentFooter->status = 2` (this may overwrite payload). Instead quarantine the header only
-     (header->status = 2), or perform a safe aligned lookahead and accept only validated header+footer pairs.
- - Decide and standardize return semantics: make `mm_malloc` return a payload pointer (recommended),
-   and update `Submission/runme.c` call sites to use the payload pointer.
+Memory/Space Analysis
+    Overhead: 44 bytes metadata per block (24H + 20F)
+    Waste: 0-39 bytes padding per block for alignment
+    Performance: O(n) allocation, O(1) read/write, O(n²) coalescing worst-case
+    Trade-off: Simplicity vs. space efficiency
 
-2) Integrity & Detection (high value)
- - Add a checksum field to `Header` and `Footer` (start with XOR or CRC8). Recalculate and store when creating/altering blocks.
- - Verify checksums in `mm_read`, `mm_write`, `mm_free`, and during `mm_malloc` scanning. Quarantine blocks on mismatch.
- - Implement `mm_verify_heap()` to traverse heap and report corrupted/quarantined regions.
+AI Usage
+    "Used AI to debug edge cases and understand Adler-32 collisions"
+    "AI helped identify logical errors in quarantine logic"
+    "All design decisions and code implementation are original"
+    Brief since limited AI use
 
-3) Robust Scanning / Allocation
- - Harden `mm_malloc` scanning with a bounded aligned lookahead: when header magic mismatches, scan up to N subsequent
-   aligned offsets (e.g., N=16 or N covering ~1KB) and accept a candidate only if header+footer magic/checksum validate.
- - When splitting a free block, only create a new free header/footer if `remainingSize >= sizeof(Header)+sizeof(Footer)`.
- - If absorbing tiny remainder, be explicit in comments and tests so future changes don't reintroduce orphan footers.
+Extra Credit
 
-4) Free/coalescing behaviour
- - Do not coalesce with quarantined neighbours (status==2).
- - Ensure `mm_free` wipes only payload bytes (not header/footer) and preserves five-byte pattern phase (current `clearSpace` already uses heap offset).
- - Add tests for double-free detection and ensure it returns/prints a clear debug message.
+    "Implemented basic allocator meeting spec requirements"
+    "Considered but didn't implement realloc/thread safety due to time"
+    "Focus was on correctness and robustness over advanced features"
 
-5) Testing & Runme
- - Add a `heap-full` test in `Submission/runme.c` and a Makefile `runme` target.
- - Add tests: double-free, brownout (partial write), radiation (random bit-flips), and pattern-preservation checks.
- - Add a debug command-line flag for `runme` to run `mm_verify_heap()` at start/end.
 
-6) Tooling & Workflow
- - Add `mm_heap_stats()` (human-readable dump of block offsets, sizes, status, checksum) to help debug.
- - Use `gcc -Wall -Wextra` during development and add a short CI/local checklist in the README.
- - Commit small focused patches (e.g., "mm_malloc: absorb tiny remainder; avoid writing mismatched footers").
+    Hand-drawn diagrams are mandatory - sketch block layouts, corruption flow
 
-7) Future Hardening (optional)
- - Consider duplicate/backup header-footer or voting scheme for higher reliability.
- - Implement atomic update ordering to tolerate partial writes from brownouts.
+    Reference your code by line/function
+
+    Be honest about limitations (space waste, O(n²) worst-case)
+
+    Show you understand the trade-offs you made
 
 

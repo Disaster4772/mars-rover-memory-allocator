@@ -3,18 +3,20 @@
 #include <string.h>
 #include <stddef.h>
 
-// Heap start must be global. Storing it in the heap creates a circular dependency
-static uint8_t *heapStart = NULL;  // Pointer to the start of the heap
-
-// Helper to get heap size from metadata
-#define GET_HEAP_SIZE() (((HeapMetadata *)heapStart)->heapSize) 
+// Heap start pointer must be global. Storing it in the heap creates a circular dependency
+static uint8_t *heapStart = NULL;
 // Payload alignment requirement
-#define ALIGNMENT 80
+#define ALIGNMENT 40
 // Metadata region: 1KB (1024 bytes) reserved at heap start for 3 copies
 #define METADATA_REGION_SIZE 1024
 #define METADATA_COPY1_OFFSET 0
 #define METADATA_COPY2_OFFSET 512
 #define METADATA_COPY3_OFFSET 1024
+
+// Block status macros
+#define BLOCK_FREE 0
+#define BLOCK_ALLOCATED 1
+#define BLOCK_QUARANTINED 2
 
 typedef struct {
     uint32_t magic; // Magic number for validation (0xCAFEBEEF)
@@ -24,22 +26,31 @@ typedef struct {
 } Header;
 
 typedef struct {
+    uint32_t magic; // 0xDEADBEEF
     size_t size; 
     uint8_t status;
-    uint32_t magic; // 0xDEADBEEF
     uint32_t fChecksum;
 } Footer;
 
 // Heap metadata stored at the beginning of the heap, fits nicely before the first header
 typedef struct {
+    uint32_t magic1;             // Magic number for validation (0xA1A1A1A1)
     size_t heapSize;             // Total heap size
     uint8_t fiveBytePattern[5];  // 5-byte pattern from initial heap state
+    uint32_t magic2;             // Magic number for validation (0xB2B2B2B2)
     uint32_t mChecksum;          // Adler-32 checksum for metadata validation
 } HeapMetadata;
 
+// Function to get heap size from metadata
+static size_t get_heap_size(void) {
+    if (heapStart == NULL) return 0;
+    HeapMetadata *meta = (HeapMetadata *)heapStart;
+    return meta->heapSize;
+}
+
 // Compute the offset of the first header so that:
-// 1) It does not overlap with 1KB metadata region at heap start (0-1023)
-// 2) The corresponding payload starts at an ALIGNMENT boundary from heapStart
+// It does not overlap with 1KB metadata region at heap start (0-1023)
+// The corresponding payload starts at an ALIGNMENT boundary from heapStart
 static size_t get_first_header_offset(void) {
     size_t headerSize = sizeof(Header);
     // Metadata region is 1KB (0-1023), so first available offset is 1024
@@ -87,10 +98,10 @@ static int metadata_check(void) {
     HeapMetadata *copy2 = (HeapMetadata *)(heapStart + METADATA_COPY2_OFFSET);
     HeapMetadata *copy3 = (HeapMetadata *)(heapStart + METADATA_COPY3_OFFSET); 
     
-    // Validate each copy's checksum to detect obvious corruption
-    int valid1 = (copy1->mChecksum == calc_heap_metadata_checksum(copy1));
-    int valid2 = (copy2->mChecksum == calc_heap_metadata_checksum(copy2));
-    int valid3 = (copy3->mChecksum == calc_heap_metadata_checksum(copy3));
+    // Validate each copy's magic numbers and checksum to detect obvious corruption
+    int valid1 = (copy1->magic1 == 0xA1A1A1A1 && copy1->magic2 == 0xB2B2B2B2 && copy1->mChecksum == calc_heap_metadata_checksum(copy1));
+    int valid2 = (copy2->magic1 == 0xA1A1A1A1 && copy2->magic2 == 0xB2B2B2B2 && copy2->mChecksum == calc_heap_metadata_checksum(copy2));
+    int valid3 = (copy3->magic1 == 0xA1A1A1A1 && copy3->magic2 == 0xB2B2B2B2 && copy3->mChecksum == calc_heap_metadata_checksum(copy3));
     int validCount = valid1 + valid2 + valid3;
 
     // Compare data content (heapSize + fiveBytePattern) for both strict and raw matches
@@ -108,6 +119,9 @@ static int metadata_check(void) {
         if (!valid3) { 
             // Repair copy 3 from majority
             *copy3 = *copy1; 
+            copy3->magic1 = 0xA1A1A1A1;
+            copy3->magic2 = 0xB2B2B2B2;
+            copy3->mChecksum = calc_heap_metadata_checksum(copy3);
             printf("WARNING: Metadata copy 3 differs from copies 1 and 2. Repairing.\n");
         }  
         return 1;
@@ -117,8 +131,10 @@ static int metadata_check(void) {
         if (!valid2) { 
             // Repair copy 2 from majority
             *copy2 = *copy1; 
+            copy2->magic1 = 0xA1A1A1A1;
+            copy2->magic2 = 0xB2B2B2B2;
+            copy2->mChecksum = calc_heap_metadata_checksum(copy2);
             printf("WARNING: Metadata copy 2 differs from copies 1 and 3. Repairing.\n");
-
         }  
         return 1;
     }
@@ -126,6 +142,9 @@ static int metadata_check(void) {
         // Copy 2 and 3 agree (majority)
         // Repair copy 1 from majority (always keep primary valid)  
         *copy1 = *copy2;  
+        copy1->magic1 = 0xA1A1A1A1;
+        copy1->magic2 = 0xB2B2B2B2;
+        copy1->mChecksum = calc_heap_metadata_checksum(copy1);
         printf("WARNING: Metadata copy 1 differs from copies 2 and 3. Repairing.\n");
         return 1;
     }
@@ -136,6 +155,12 @@ static int metadata_check(void) {
         *copy1 = *src;
         *copy2 = *src;
         *copy3 = *src;
+        copy1->magic1 = 0xA1A1A1A1;
+        copy1->magic2 = 0xB2B2B2B2;
+        copy2->magic1 = 0xA1A1A1A1;
+        copy2->magic2 = 0xB2B2B2B2;
+        copy3->magic1 = 0xA1A1A1A1;
+        copy3->magic2 = 0xB2B2B2B2;
         copy1->mChecksum = calc_heap_metadata_checksum(copy1);
         copy2->mChecksum = calc_heap_metadata_checksum(copy2);
         copy3->mChecksum = calc_heap_metadata_checksum(copy3);
@@ -146,6 +171,12 @@ static int metadata_check(void) {
     // Fallback: data-only majority (all checksums bad but two copies still match)
     if (rawMatch12) {
         *copy3 = *copy1;
+        copy1->magic1 = 0xA1A1A1A1;
+        copy1->magic2 = 0xB2B2B2B2;
+        copy2->magic1 = 0xA1A1A1A1;
+        copy2->magic2 = 0xB2B2B2B2;
+        copy3->magic1 = 0xA1A1A1A1;
+        copy3->magic2 = 0xB2B2B2B2;
         copy1->mChecksum = calc_heap_metadata_checksum(copy1);
         copy2->mChecksum = calc_heap_metadata_checksum(copy2);
         copy3->mChecksum = calc_heap_metadata_checksum(copy3);
@@ -153,6 +184,12 @@ static int metadata_check(void) {
         return 1;
     } else if (rawMatch13) {
         *copy2 = *copy1;
+        copy1->magic1 = 0xA1A1A1A1;
+        copy1->magic2 = 0xB2B2B2B2;
+        copy2->magic1 = 0xA1A1A1A1;
+        copy2->magic2 = 0xB2B2B2B2;
+        copy3->magic1 = 0xA1A1A1A1;
+        copy3->magic2 = 0xB2B2B2B2;
         copy1->mChecksum = calc_heap_metadata_checksum(copy1);
         copy2->mChecksum = calc_heap_metadata_checksum(copy2);
         copy3->mChecksum = calc_heap_metadata_checksum(copy3);
@@ -160,6 +197,12 @@ static int metadata_check(void) {
         return 1;
     } else if (rawMatch23) {
         *copy1 = *copy2;
+        copy1->magic1 = 0xA1A1A1A1;
+        copy1->magic2 = 0xB2B2B2B2;
+        copy2->magic1 = 0xA1A1A1A1;
+        copy2->magic2 = 0xB2B2B2B2;
+        copy3->magic1 = 0xA1A1A1A1;
+        copy3->magic2 = 0xB2B2B2B2;
         copy1->mChecksum = calc_heap_metadata_checksum(copy1);
         copy2->mChecksum = calc_heap_metadata_checksum(copy2);
         copy3->mChecksum = calc_heap_metadata_checksum(copy3);
@@ -198,7 +241,7 @@ Header *find_previous_header(Header *currentHeader) {
     size_t firstHeaderOffset = get_first_header_offset();
     uintptr_t firstHeaderPos = (uintptr_t)heapStart + firstHeaderOffset;
     uintptr_t currentAddr = (uintptr_t)currentHeader;
-    uint8_t *heapEnd = heapStart + GET_HEAP_SIZE();
+    uint8_t *heapEnd = heapStart + get_heap_size();
 
     if (currentAddr <= firstHeaderPos) {
         return NULL; // No previous block exists
@@ -246,7 +289,6 @@ Header *find_previous_header(Header *currentHeader) {
 void clear_space(uint8_t *start, size_t size) {
     // Read heap metadata from the start of the heap
     HeapMetadata *metadata = (HeapMetadata *)heapStart;
-    
     // Replace bits with five byte pattern, relative to start of heap
     uintptr_t offset = (uintptr_t)start - (uintptr_t)heapStart;
     size_t patternStart = offset % 5;
@@ -276,29 +318,38 @@ int mm_init(uint8_t *heap, size_t heap_size){
     // Store heap metadata at three spatially-separated offsets for redundancy
     // Copy 1 (primary) at offset 0
     HeapMetadata *copy1 = (HeapMetadata *)(heapStart + METADATA_COPY1_OFFSET);
+    copy1->magic1 = 0xA1A1A1A1;
     copy1->heapSize = heap_size;
     memcpy(copy1->fiveBytePattern, pattern, 5);
+    copy1->magic2 = 0xB2B2B2B2;
     copy1->mChecksum = calc_heap_metadata_checksum(copy1);
-    
+
     // Copy 2 (backup) at offset 512
     HeapMetadata *copy2 = (HeapMetadata *)(heapStart + METADATA_COPY2_OFFSET);
     *copy2 = *copy1;
-    
+    copy2->magic1 = 0xA1A1A1A1;
+    copy2->magic2 = 0xB2B2B2B2;
+    copy2->mChecksum = calc_heap_metadata_checksum(copy2);
+
     // Copy 3 (backup) at offset 1024
     HeapMetadata *copy3 = (HeapMetadata *)(heapStart + METADATA_COPY3_OFFSET);
     *copy3 = *copy1; 
+    copy3->magic1 = 0xA1A1A1A1;
+    copy3->magic2 = 0xB2B2B2B2;
+    copy3->mChecksum = calc_heap_metadata_checksum(copy3);
 
     // Place the first header so that its payload starts on an ALIGNMENT boundary and metadata is preserved
     Header *firstHeader = (Header *)(heapStart + firstHeaderOffset);
+
     firstHeader->size = heap_size - firstHeaderOffset;
-    firstHeader->status = 0;
+    firstHeader->status = BLOCK_FREE;
     firstHeader->magic = 0xCAFEBEEF;
     firstHeader->hChecksum = calc_header_checksum(firstHeader);
 
     // Place footer at the end of the heap
     Footer *firstFooter = (Footer *)(heapStart + heap_size - sizeof(Footer));
     firstFooter->size = firstHeader->size;
-    firstFooter->status = 0;
+    firstFooter->status = BLOCK_FREE;
     firstFooter->magic = 0xDEADBEEF;
     firstFooter->fChecksum = calc_footer_checksum(firstFooter);
     return 0;
@@ -320,24 +371,24 @@ void *mm_malloc(size_t size){
     // First header offset is computed to preserve metadata and align payloads to 40 bytes
     size_t firstHeaderOffset = get_first_header_offset();
     Header *currentHeader = (Header *)(heapStart + firstHeaderOffset);
-    uint8_t *heapEnd = heapStart + GET_HEAP_SIZE();
+    uint8_t *heapEnd = heapStart + get_heap_size();
 
     // If the very first header was corrupted by a storm, rebuild the initial free block
     if (currentHeader->magic != 0xCAFEBEEF || currentHeader->hChecksum != calc_header_checksum(currentHeader)) {
-        size_t totalSize = GET_HEAP_SIZE();
+        size_t totalSize = get_heap_size();
         size_t freeBlockSize = totalSize - firstHeaderOffset;
         if (freeBlockSize < sizeof(Header) + sizeof(Footer)) {
             printf("ERROR: ALLOCATION FAILED. Heap too small after metadata.\n");
             return NULL;
         }
         currentHeader->size = freeBlockSize;
-        currentHeader->status = 0;
+        currentHeader->status = BLOCK_FREE;
         currentHeader->magic = 0xCAFEBEEF;
         currentHeader->hChecksum = calc_header_checksum(currentHeader);
 
         Footer *firstFooter = (Footer *)(heapStart + totalSize - sizeof(Footer));
         firstFooter->size = freeBlockSize;
-        firstFooter->status = 0;
+        firstFooter->status = BLOCK_FREE;
         firstFooter->magic = 0xDEADBEEF;
         firstFooter->fChecksum = calc_footer_checksum(firstFooter);
     }
@@ -373,24 +424,24 @@ void *mm_malloc(size_t size){
         }
         // At this point, we can trust the header metadata
         Footer *currentFooter = (Footer *)((uint8_t *)currentHeader + currentHeader->size - sizeof(Footer));
-        if (currentHeader->status == 2){
-            currentFooter->status = 2;
+        if (currentHeader->status == BLOCK_QUARANTINED){
+            currentFooter->status = BLOCK_QUARANTINED;
             // We've changed status, so we need to re-calculate the checksum
             currentFooter->fChecksum = calc_footer_checksum(currentFooter);
             // Use trusted header size to skip to next block
             currentHeader = (Header *)((uintptr_t)currentHeader + currentHeader->size);
-            if ((uintptr_t)currentHeader > (uintptr_t)(heapStart + GET_HEAP_SIZE())){
+            if ((uintptr_t)currentHeader > (uintptr_t)(heapStart + get_heap_size())){
                 printf("ERROR: ALLOCATION FAILED. Reached end of heap without finding a valid header.\n");
                 return NULL;
             }
             continue;      
         }
         // Move onto checking the footer.
-        else if (currentFooter->magic != 0xDEADBEEF || currentFooter->fChecksum != calc_footer_checksum(currentFooter) || currentFooter->status == 2) {
+        else if (currentFooter->magic != 0xDEADBEEF || currentFooter->fChecksum != calc_footer_checksum(currentFooter) || currentFooter->status == BLOCK_QUARANTINED) {
             // If this is the very first block and only the footer is corrupted, rebuild footer instead of quarantining
             uintptr_t currentOffset = (uintptr_t)currentHeader - (uintptr_t)heapStart;
             if (currentOffset == firstHeaderOffset && currentHeader->status == 0 &&
-                currentOffset + currentHeader->size == (size_t)GET_HEAP_SIZE()) {
+                currentOffset + currentHeader->size == (size_t)get_heap_size()) {
                 currentFooter->size = currentHeader->size;
                 currentFooter->status = 0;
                 currentFooter->magic = 0xDEADBEEF;
@@ -402,7 +453,7 @@ void *mm_malloc(size_t size){
             currentHeader->status = 2;
             currentHeader->hChecksum = calc_header_checksum(currentHeader);
             currentHeader = (Header *)((uintptr_t)currentHeader + currentHeader->size);
-            if ((uintptr_t)currentHeader > (uintptr_t)(heapStart + GET_HEAP_SIZE())){
+            if ((uintptr_t)currentHeader > (uintptr_t)(heapStart + get_heap_size())){
                 printf("ERROR: ALLOCATION FAILED. Reached end of heap without finding a valid header.\n");
                 return NULL;
             }
@@ -411,7 +462,7 @@ void *mm_malloc(size_t size){
         }
 
         // If the block is marked as free and has the requested amount of space, then we can allocate this block
-        if (currentHeader->status == 0 && (currentHeader->size - sizeof(Header) - sizeof(Footer)) >= size){
+        if (currentHeader->status == BLOCK_FREE && (currentHeader->size - sizeof(Header) - sizeof(Footer)) >= size){
             // Save original block size before modifying
             size_t originalBlockSize = currentHeader->size;
 
@@ -445,14 +496,14 @@ void *mm_malloc(size_t size){
             // Create header at aligned position
             Header *alignedHeader = (Header *)(heapStart + newHeaderOffset);
             alignedHeader->size = blockSize;
-            alignedHeader->status = 1;
+            alignedHeader->status = BLOCK_ALLOCATED;
             alignedHeader->magic = 0xCAFEBEEF;
             alignedHeader->hChecksum = calc_header_checksum(alignedHeader);
 
             // Write allocated footer at end of allocated portion
             Footer *newFooter = (Footer *)(heapStart + blockEndOffset - sizeof(Footer));
             newFooter->size = blockSize;
-            newFooter->status = 1;
+            newFooter->status = BLOCK_ALLOCATED;
             newFooter->magic = 0xDEADBEEF;
             newFooter->fChecksum = calc_footer_checksum(newFooter);
 
@@ -476,14 +527,14 @@ void *mm_malloc(size_t size){
                 uintptr_t nextFreeOffset = blockEndOffset;
                 Header *nextHeader = (Header *)(heapStart + nextFreeOffset);
                 nextHeader->size = remainingSpace;
-                nextHeader->status = 0;
+                nextHeader->status = BLOCK_FREE;
                 nextHeader->magic = 0xCAFEBEEF;
                 nextHeader->hChecksum = calc_header_checksum(nextHeader);
 
                 // currentFooter was the sibling of currentHeader, but now appears after the newFooter, so just overwrite it and use it for this new block
                 // Overwrite to use it for the new block
                 currentFooter->size = remainingSpace;
-                currentFooter->status = 0;
+                currentFooter->status = BLOCK_FREE;
                 currentFooter->magic = 0xDEADBEEF;
                 currentFooter->fChecksum = calc_footer_checksum(currentFooter);
             }
@@ -524,12 +575,12 @@ int mm_read(void *ptr, size_t offset, void *buf, size_t len){
     size_t payloadSize = blockSize - sizeof(Header) - sizeof(Footer);
 
     // Check pointer is in heap
-    if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + GET_HEAP_SIZE()) {
+    if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + get_heap_size()) {
         printf("DEBUG: Read attempt failed - Pointer is outside of heap.\n");
         return -1;
     }
     // Check we're not attempting to read an empty block 
-    else if((header->status) == 0){
+    else if((header->status) == BLOCK_FREE){
         printf("DEBUG: Read attempt failed - Header indicates block has not been allocated. It is empty.\n");
         return -1;
     }
@@ -539,7 +590,7 @@ int mm_read(void *ptr, size_t offset, void *buf, size_t len){
         return -1;
     }
     // Check block isn't quarantined
-    else if((header->status) == 2){
+    else if((header->status) == BLOCK_QUARANTINED){
         printf("DEBUG: Read attempt failed - Header indicates block has been quarantined.\n");
         return -1;
     }
@@ -583,12 +634,12 @@ int mm_write(void *ptr, size_t offset, const void *src, size_t len){
     size_t payloadSize = blockSize - sizeof(Header) - sizeof(Footer);
 
     // Check pointer is in heap
-    if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + GET_HEAP_SIZE()) {
+    if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + get_heap_size()) {
         printf("DEBUG: Write attempt failed - Pointer is outside of heap.\n");
         return -1;
     }
     // Check block has been allocated to be written to
-    else if((header->status) == 0){
+    else if((header->status) == BLOCK_FREE){
         printf("DEBUG: Write attempt failed - Block has not been allocated.\n");
         return -1;
     } 
@@ -598,7 +649,7 @@ int mm_write(void *ptr, size_t offset, const void *src, size_t len){
         return -1;
     }
     // Check block isn't quarantined
-    else if((header->status) == 2){
+    else if((header->status) == BLOCK_QUARANTINED){
         printf("DEBUG: Write attempt failed - Header indicates block has been quarantined.\n");
         return -1;
     }
@@ -630,7 +681,7 @@ void mm_free(void *ptr){
     }
     
     // Check pointer is within heap bounds
-    else if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + GET_HEAP_SIZE()) {
+    else if ((uint8_t *)ptr < heapStart || (uint8_t *)ptr >= heapStart + get_heap_size()) {
         printf("DEBUG: Free attempt failed - Pointer outside heap bounds.\n");
         return;
     }
@@ -643,15 +694,15 @@ void mm_free(void *ptr){
     if (currentHeader->magic != 0xCAFEBEEF ||
         currentHeader->hChecksum != calc_header_checksum(currentHeader)) {
         printf("DEBUG: Free attempt failed - Header magic/checksum corrupted. Block quarantined.\n");
-        currentHeader->status = 2; // Quarantine instead of freeing
+        currentHeader->status = BLOCK_QUARANTINED; // Quarantine instead of freeing
         return;
     }
 
     // Validate header size is reasonable
     size_t blockSize = currentHeader->size;
-    if (blockSize < sizeof(Header) + sizeof(Footer) || blockSize > GET_HEAP_SIZE()) {
+    if (blockSize < sizeof(Header) + sizeof(Footer) || blockSize > get_heap_size()) {
         printf("DEBUG: Free attempt failed - Invalid block size. Block quarantined.\n");
-        currentHeader->status = 2;
+        currentHeader->status = BLOCK_QUARANTINED;
         return;
     }
 
@@ -663,27 +714,27 @@ void mm_free(void *ptr){
     if (currentFooter->magic != 0xDEADBEEF ||
         currentFooter->fChecksum != calc_footer_checksum(currentFooter)) {
         printf("DEBUG: Free attempt failed - Footer magic/checksum corrupted. Block quarantined.\n");
-        currentHeader->status = 2;
+        currentHeader->status = BLOCK_QUARANTINED;
         return;
     }
 
     // Check for double-free
-    if (currentHeader->status == 0) {
+    if (currentHeader->status == BLOCK_FREE) {
         printf("DEBUG: Free attempt failed - Double-free detected.\n");
         return;
     }
 
     // Check block isn't already quarantined
-    if (currentHeader->status == 2) {
+    if (currentHeader->status == BLOCK_QUARANTINED) {
         printf("DEBUG: Free attempt failed - Block already quarantined.\n");
         return;
     }
 
     // Mark as free
 
-    currentHeader->status = 0;
+    currentHeader->status = BLOCK_FREE;
     currentHeader->hChecksum = calc_header_checksum(currentHeader);
-    currentFooter->status = 0;
+    currentFooter->status = BLOCK_FREE;
     currentFooter->fChecksum = calc_footer_checksum(currentFooter);
 
     // Wipe payload (do not overwrite footer)
@@ -699,7 +750,7 @@ void mm_free(void *ptr){
     // Check if previous block is free and merge
 
     if (prevHeader != NULL) {
-        if (prevHeader->magic == 0xCAFEBEEF && prevHeader->status == 0 &&
+        if (prevHeader->magic == 0xCAFEBEEF && prevHeader->status == BLOCK_FREE &&
             prevHeader->hChecksum == calc_header_checksum(prevHeader)) {
             Footer *prevFooter = (Footer *)((uint8_t *)prevHeader + prevHeader->size - sizeof(Footer));
             if (prevFooter->magic == 0xDEADBEEF &&
@@ -711,7 +762,7 @@ void mm_free(void *ptr){
                 // Recompute footer for merged block (should be at old currentFooter location)
                 Footer *mergedFooter = (Footer *)((uint8_t *)prevHeader + prevHeader->size - sizeof(Footer));
                 mergedFooter->size = prevHeader->size;
-                mergedFooter->status = 0;
+                mergedFooter->status = BLOCK_FREE;
                 mergedFooter->magic = 0xDEADBEEF;
                 mergedFooter->fChecksum = calc_footer_checksum(mergedFooter);
 
@@ -731,11 +782,11 @@ void mm_free(void *ptr){
 
     // Check if next block is within bounds and free, then merge
     uintptr_t nextHeaderAddr = (uintptr_t)currentHeader + currentHeader->size;
-    if (nextHeaderAddr < (uintptr_t)heapStart + GET_HEAP_SIZE()) {
+    if (nextHeaderAddr < (uintptr_t)heapStart + get_heap_size()) {
         Header *nextHeader = (Header *)nextHeaderAddr;
 
         // Validate next header before using it
-        if (nextHeader->magic == 0xCAFEBEEF && nextHeader->status == 0 &&
+        if (nextHeader->magic == 0xCAFEBEEF && nextHeader->status == BLOCK_FREE &&
             nextHeader->hChecksum == calc_header_checksum(nextHeader)) {
             Footer *nextFooter = (Footer *)((uint8_t *)nextHeader + nextHeader->size - sizeof(Footer));
             if (nextFooter->magic == 0xDEADBEEF &&
@@ -747,7 +798,7 @@ void mm_free(void *ptr){
                 // Recompute footer for the newly merged block
                 Footer *mergedFooter = (Footer *)((uint8_t *)currentHeader + currentHeader->size - sizeof(Footer));
                 mergedFooter->size = currentHeader->size;
-                mergedFooter->status = 0;
+                mergedFooter->status = BLOCK_FREE;
                 mergedFooter->magic = 0xDEADBEEF;
                 mergedFooter->fChecksum = calc_footer_checksum(mergedFooter);
 
@@ -761,9 +812,9 @@ void mm_free(void *ptr){
         } else {
             // No valid header found at expected offset - might be padding
             // Scan forward in 40-byte increments to find the next block header
-            for (uintptr_t scanAddr = nextHeaderAddr + 40; scanAddr < (uintptr_t)heapStart + GET_HEAP_SIZE(); scanAddr += 40) {
+            for (uintptr_t scanAddr = nextHeaderAddr + 40; scanAddr < (uintptr_t)heapStart + get_heap_size(); scanAddr += 40) {
                 Header *scanHeader = (Header *)scanAddr;
-                if (scanHeader->magic == 0xCAFEBEEF && scanHeader->status == 0 &&
+                if (scanHeader->magic == 0xCAFEBEEF && scanHeader->status == BLOCK_FREE &&
                     scanHeader->hChecksum == calc_header_checksum(scanHeader)) {
                     // Found a valid free block header - include padding and merge
                     size_t paddingSize = scanAddr - nextHeaderAddr;
@@ -773,7 +824,7 @@ void mm_free(void *ptr){
                     // Recompute footer
                     Footer *mergedFooter = (Footer *)((uint8_t *)currentHeader + currentHeader->size - sizeof(Footer));
                     mergedFooter->size = currentHeader->size;
-                    mergedFooter->status = 0;
+                    mergedFooter->status = BLOCK_FREE;
                     mergedFooter->magic = 0xDEADBEEF;
                     mergedFooter->fChecksum = calc_footer_checksum(mergedFooter);
                     break;
